@@ -23,16 +23,10 @@ var (
 	ErrNilContext    = fmt.Errorf("context cannot be nil")
 )
 
-// s3API defines the interface for S3 operations
-type s3API interface {
-	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-}
-
-// S3Client handles S3 operations
+// S3Client implements S3Interface for AWS S3 operations
 type S3Client struct {
-	s3Client s3API
-	bucket   string
+	client *s3.Client
+	bucket string
 }
 
 // s3Config holds the configuration for S3 client
@@ -126,8 +120,8 @@ func NewS3Client(ctx context.Context, bucket string) (*S3Client, error) {
 	}
 
 	return &S3Client{
-		s3Client: client,
-		bucket:   bucket,
+		client: client,
+		bucket: bucket,
 	}, nil
 }
 
@@ -151,7 +145,7 @@ func (c *S3Client) UploadFile(ctx context.Context, userID string, filename strin
 	filename = strings.TrimPrefix(filename, "/")
 	key := fmt.Sprintf("incoming/%s/%s", userID, filename)
 
-	_, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
 		Body:   content,
@@ -161,4 +155,12 @@ func (c *S3Client) UploadFile(ctx context.Context, userID string, filename strin
 	}
 
 	return nil
+}
+
+// GetS3Client returns the underlying AWS S3 client
+func (s *S3Client) GetS3Client() interface {
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+} {
+	return s.client
 }

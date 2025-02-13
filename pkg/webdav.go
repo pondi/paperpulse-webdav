@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/pondi/pulsedav/pkg/logging"
 )
 
 // Common errors
@@ -105,23 +107,28 @@ func writeWebDAVError(w http.ResponseWriter, err error) {
 // WebDAVHandler handles WebDAV requests, supporting only PUT operations
 // for file uploads to S3 storage.
 type WebDAVHandler struct {
-	auth     AuthenticatorInterface
-	s3Client S3Interface
+	auth        AuthenticatorInterface
+	s3Client    S3Interface
+	auditLogger *logging.AuditLogger
 }
 
 // NewWebDAVHandler creates a new WebDAV handler with the given authenticator and S3 client.
 // The handler only supports PUT operations, all other operations return 405 Method Not Allowed.
-func NewWebDAVHandler(authenticator AuthenticatorInterface, s3Client S3Interface) *WebDAVHandler {
+func NewWebDAVHandler(authenticator AuthenticatorInterface, s3Client S3Interface, auditLogger *logging.AuditLogger) *WebDAVHandler {
 	if authenticator == nil {
 		panic("authenticator cannot be nil")
 	}
 	if s3Client == nil {
 		panic("s3Client cannot be nil")
 	}
+	if auditLogger == nil {
+		panic("auditLogger cannot be nil")
+	}
 
 	return &WebDAVHandler{
-		auth:     authenticator,
-		s3Client: s3Client,
+		auth:        authenticator,
+		s3Client:    s3Client,
+		auditLogger: auditLogger,
 	}
 }
 
@@ -171,15 +178,18 @@ func (h *WebDAVHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		h.auditLogger.LogAuthAttempt(false, username, r)
 		return "", false
 	}
 
 	authResult, err := h.auth.Authenticate(r.Context(), username, password)
 	if err != nil || !authResult.Authenticated {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		h.auditLogger.LogAuthAttempt(false, username, r)
 		return "", false
 	}
 
+	h.auditLogger.LogAuthAttempt(true, username, r)
 	return authResult.UserID, true
 }
 
@@ -248,6 +258,9 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, userID
 		writeWebDAVError(w, ErrFileTooLarge)
 		return
 	}
+
+	// Log the upload attempt
+	h.auditLogger.LogUpload(true, filename, r.ContentLength, r)
 
 	// Upload the buffered file to S3
 	if err := h.s3Client.UploadFile(r.Context(), userID, filename, bytes.NewReader(fileData)); err != nil {

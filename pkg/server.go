@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/pondi/pulsedav/pkg/logging"
 )
 
 // Common errors
@@ -51,6 +53,8 @@ type Server struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	Handler      http.Handler
+	logger       *logging.Logger
+	auditLogger  *logging.AuditLogger
 }
 
 // NewServer creates a new WebDAV server with default configuration.
@@ -69,7 +73,24 @@ func NewServer() (*Server, error) {
 		return nil, err
 	}
 
-	return newServerWithS3Client(s3Client)
+	// Initialize logger
+	logger, err := initLogger(s3Client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+	}
+
+	// Create audit logger
+	auditLogger := logging.NewAuditLogger(logger)
+
+	server, err := newServerWithS3Client(s3Client)
+	if err != nil {
+		return nil, err
+	}
+
+	server.logger = logger
+	server.auditLogger = auditLogger
+
+	return server, nil
 }
 
 // newServerWithS3Client creates a new server with the provided S3 client.
@@ -79,8 +100,17 @@ func newServerWithS3Client(s3Client S3Interface) (*Server, error) {
 		return nil, fmt.Errorf("s3 client cannot be nil")
 	}
 
+	// Initialize logger
+	logger, err := initLogger(s3Client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+	}
+
+	// Create audit logger
+	auditLogger := logging.NewAuditLogger(logger)
+
 	// Create WebDAV handler with middleware chain
-	handler := buildHandlerChain(NewAuthenticator(), s3Client)
+	handler := buildHandlerChain(NewAuthenticator(), s3Client, logger, auditLogger)
 
 	// Get port from environment variable or use default
 	port := os.Getenv("PORT")
@@ -95,6 +125,8 @@ func newServerWithS3Client(s3Client S3Interface) (*Server, error) {
 		ReadTimeout:  DefaultReadTimeout,
 		WriteTimeout: DefaultWriteTimeout,
 		IdleTimeout:  DefaultIdleTimeout,
+		logger:       logger,
+		auditLogger:  auditLogger,
 	}, nil
 }
 
@@ -107,12 +139,44 @@ func initS3Client() (S3Interface, error) {
 	return s3Client, nil
 }
 
+// initLogger initializes the logging system
+func initLogger(s3Client S3Interface) (*logging.Logger, error) {
+	// Get the environment from env var or default to development
+	env := os.Getenv("ENVIRONMENT")
+	if env == "" {
+		env = "development"
+	}
+
+	// Create S3 sink for logs
+	s3Sink := logging.NewS3Sink(
+		s3Client.GetS3Client(),
+		os.Getenv("S3_BUCKET"),
+		"webdav",
+		env,
+		"webdav-server",
+		nil, // Use default options
+	)
+
+	// Create console sink for human-readable logs
+	consoleSink := logging.NewConsoleSink()
+
+	// Create logger with both sinks
+	logger := logging.NewLogger(
+		1000,           // Buffer size
+		30*time.Second, // Flush interval
+		consoleSink,    // Console sink first for immediate output
+		s3Sink,         // S3 sink second for persistence
+	)
+
+	return logger, nil
+}
+
 // buildHandlerChain creates the middleware chain for the WebDAV handler
-func buildHandlerChain(authenticator AuthenticatorInterface, s3Client S3Interface) http.Handler {
-	webdavHandler := NewWebDAVHandler(authenticator, s3Client)
+func buildHandlerChain(authenticator AuthenticatorInterface, s3Client S3Interface, logger *logging.Logger, auditLogger *logging.AuditLogger) http.Handler {
+	webdavHandler := NewWebDAVHandler(authenticator, s3Client, auditLogger)
 
 	return SecurityHeaders(
-		RequestLogger(
+		logging.RequestLoggerMiddleware(logger)(
 			RateLimiter(
 				RequestSizeLimiter(
 					webdavHandler,
@@ -171,6 +235,16 @@ func (s *Server) shutdown(server *http.Server) error {
 
 	// Shutdown rate limiter
 	ShutdownRateLimiter()
+
+	// Flush logs before shutdown
+	if s.logger != nil {
+		if err := s.logger.Flush(); err != nil {
+			log.Printf("Error flushing logs: %v", err)
+		}
+		if err := s.logger.Close(); err != nil {
+			log.Printf("Error closing logger: %v", err)
+		}
+	}
 
 	// Shutdown HTTP server
 	if err := server.Shutdown(shutdownCtx); err != nil {
