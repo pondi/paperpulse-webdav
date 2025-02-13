@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -19,7 +20,8 @@ var (
 
 // Server configuration constants
 const (
-	DefaultAddr         = ":80"
+	DefaultPort         = "80"
+	DefaultAddr         = ":" + DefaultPort
 	DefaultReadTimeout  = 30 * time.Second
 	DefaultWriteTimeout = 30 * time.Second
 	DefaultIdleTimeout  = 120 * time.Second
@@ -28,8 +30,18 @@ const (
 
 // RequiredEnvVars lists the environment variables that must be set
 var RequiredEnvVars = []string{
-	"AUTH_API_URL",
 	"S3_BUCKET",
+}
+
+// getRequiredEnvVars returns the list of required environment variables based on auth mode
+func getRequiredEnvVars() []string {
+	vars := RequiredEnvVars
+	if strings.ToLower(os.Getenv("API_AUTH")) == "true" {
+		vars = append(vars, "AUTH_API_URL")
+	} else {
+		vars = append(vars, "LOCAL_AUTH_USERNAME", "LOCAL_AUTH_PASSWORD")
+	}
+	return vars
 }
 
 // Server represents the WebDAV server configuration
@@ -45,7 +57,7 @@ type Server struct {
 // It loads environment variables and initializes all required components.
 func NewServer() (*Server, error) {
 	// Validate required environment variables
-	for _, envVar := range RequiredEnvVars {
+	for _, envVar := range getRequiredEnvVars() {
 		if os.Getenv(envVar) == "" {
 			return nil, fmt.Errorf("%w: %s", ErrMissingEnvVar, envVar)
 		}
@@ -81,8 +93,15 @@ func newServerWithS3Client(s3Client S3Interface) (*Server, error) {
 	// Create WebDAV handler with middleware chain
 	handler := buildHandlerChain(NewAuthenticator(), s3Client)
 
+	// Get port from environment variable or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = DefaultPort
+	}
+	addr := ":" + port
+
 	return &Server{
-		Addr:         DefaultAddr,
+		Addr:         addr,
 		Handler:      handler,
 		ReadTimeout:  DefaultReadTimeout,
 		WriteTimeout: DefaultWriteTimeout,

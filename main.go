@@ -57,9 +57,10 @@
 // WebDAV Operations:
 //   - PUT: Uploads file to S3 storage
 //   - Other operations: Not supported (returns 405 Method Not Allowed)
-package pulsedav
+package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -68,14 +69,57 @@ import (
 	"github.com/pondi/pulsedav/pkg"
 )
 
-// NewDefaultServer creates a new WebDAV server with default configuration.
-// It loads environment variables and initializes all required components.
-func NewDefaultServer() (*pkg.Server, error) {
-	// Load environment variables
+// Config represents the application configuration
+type Config struct {
+	S3 S3Config
+}
+
+// S3Config holds S3-specific configuration
+type S3Config struct {
+	Bucket   string
+	Region   string
+	Endpoint string
+}
+
+func main() {
+	// Load environment variables from .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: .env file not found or error loading it: %v", err)
 	}
 
+	// Initialize configuration
+	config := &Config{
+		S3: S3Config{
+			Bucket:   os.Getenv("S3_BUCKET"),
+			Region:   os.Getenv("S3_REGION"),
+			Endpoint: os.Getenv("S3_ENDPOINT"),
+		},
+	}
+
+	// Validate configuration
+	if config.S3.Bucket == "" {
+		log.Fatal("S3_BUCKET environment variable is required")
+	}
+
+	// Initialize server
+	server, err := NewDefaultServer()
+	if err != nil {
+		log.Fatalf("Failed to initialize server: %v", err)
+	}
+
+	// Create context for graceful shutdown
+	ctx := context.Background()
+
+	// Start the server
+	log.Printf("Starting WebDAV server on %s", server.Addr)
+	if err := server.ListenAndServe(ctx); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+// NewDefaultServer creates a new WebDAV server with default configuration.
+// It loads environment variables and initializes all required components.
+func NewDefaultServer() (*pkg.Server, error) {
 	// Validate required environment variables
 	for _, envVar := range pkg.RequiredEnvVars {
 		if os.Getenv(envVar) == "" {

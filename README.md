@@ -1,12 +1,14 @@
 # PulseDAV
 
-A WebDAV package that provides secure file upload functionality with S3-compatible storage backend.
+A standalone WebDAV server with S3-compatible storage backend, focusing on secure file uploads.
 
 ## Features
 
 - WebDAV server implementation supporting only PUT operations
 - S3-compatible storage backend
-- Basic authentication with external API integration
+- Dual authentication modes:
+  - External API authentication
+  - Local user authentication
 - Built-in security features:
   - File size limits
   - Rate limiting
@@ -18,18 +20,31 @@ A WebDAV package that provides secure file upload functionality with S3-compatib
 ## Installation
 
 ```bash
-go get github.com/pondi/pulsedav
+git clone https://github.com/pondi/pulsedav
+cd pulsedav
+go mod download
 ```
 
 ## Configuration
 
-Set the following environment variables:
+Create a `.env` file in the project root or set the following environment variables:
 
 Required:
-- `AUTH_API_URL`: Authentication API endpoint
 - `S3_BUCKET`: S3 bucket name
+- `API_AUTH`: Set to "true" to use API authentication, "false" for local authentication
 
-Optional:
+When using API authentication (`API_AUTH=true`):
+- `AUTH_API_URL`: Authentication API endpoint
+
+When using local authentication (`API_AUTH=false`):
+- `LOCAL_AUTH_USERNAME`: Username for local authentication
+- `LOCAL_AUTH_PASSWORD`: Password for local authentication
+- `LOCAL_AUTH_USER_ID`: User ID for local authentication (optional, defaults to "1")
+
+Optional Configuration:
+- `PORT`: Server port number (default: 80)
+
+Optional S3 Configuration:
 - `S3_ENDPOINT`: Custom S3 endpoint URL
 - `S3_REGION`: S3 region (default: us-east-1)
 - `S3_ACCESS_KEY`: S3 access key
@@ -37,34 +52,50 @@ Optional:
 - `S3_SESSION_TOKEN`: Session token
 - `S3_FORCE_PATH_STYLE`: Use path-style S3 URLs (default: false)
 
+Example `.env` file for API authentication:
+```env
+API_AUTH=true
+AUTH_API_URL=http://your-auth-api
+PORT=8080
+S3_BUCKET=your-bucket
+S3_REGION=your-region
+S3_ENDPOINT=your-endpoint
+S3_ACCESS_KEY=your-access-key
+S3_SECRET_KEY=your-secret-key
+```
+
+Example `.env` file for local authentication:
+```env
+API_AUTH=false
+LOCAL_AUTH_USERNAME=admin
+LOCAL_AUTH_PASSWORD=secret
+LOCAL_AUTH_USER_ID=1000
+PORT=8080
+S3_BUCKET=your-bucket
+S3_REGION=your-region
+S3_ACCESS_KEY=your-access-key
+S3_SECRET_KEY=your-secret-key
+```
+
 ## Usage
 
-Import and use the package in your Go application:
+Run the server:
 
-```go
-package main
-
-import (
-    "log"
-    "net/http"
-    "github.com/pondi/pulsedav"
-)
-
-func main() {
-    server, err := pulsedav.NewDefaultServer()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Use as an HTTP handler
-    http.Handle("/webdav/", server)
-    log.Fatal(http.ListenAndServe(":8080", nil))
-}
+```bash
+go run main.go
 ```
+
+The server will start with the following default settings:
+- Address: :80 (unless specified by PORT environment variable)
+- Read timeout: 30 seconds
+- Write timeout: 30 seconds
+- Idle timeout: 120 seconds
+- Max file size: 100MB
+- Rate limit: 100 requests per minute
 
 ## Authentication API Requirements
 
-Your authentication endpoint should:
+When using API authentication (`API_AUTH=true`), your authentication endpoint should:
 
 1. Accept POST requests with:
 ```json
@@ -85,6 +116,15 @@ Your authentication endpoint should:
 ## File Storage
 
 Files are stored in S3 using the path: `incoming/{userID}/{filename}`
+
+## Supported File Types
+
+The following file extensions are allowed:
+- Documents: .txt, .pdf, .doc, .docx
+- Spreadsheets: .xls, .xlsx
+- Images: .jpg, .jpeg, .png, .gif
+- Archives: .zip
+- Data: .csv
 
 ## License
 

@@ -18,6 +18,12 @@ const (
 	RateLimitRequests = 100               // requests per minute
 	// Time to keep IP rate limiters in memory
 	RateLimitWindow = 1 * time.Hour
+
+	// Path validation constants
+	MaxPathLength     = 255
+	MaxFileNameLength = 255
+	MaxPathSegments   = 10
+	MaxPathDepth      = 5
 )
 
 var (
@@ -25,8 +31,21 @@ var (
 		".txt", ".pdf", ".doc", ".docx", ".xls", ".xlsx",
 		".jpg", ".jpeg", ".png", ".gif", ".zip", ".csv",
 	}
+
+	// Enhanced path sanitization patterns
 	DisallowedPaths = []string{
 		"..", "//", "\\", "%2e", "%2f",
+		"~", "*", "?", "[", "]", "{", "}", "|", "^",
+		"<", ">", "'", "\"", ";", "!", "@", "#", "$",
+		"%", "^", "&", "(", ")", "+", "=", "`",
+	}
+
+	// Regex patterns for path validation
+	PathValidationPatterns = []string{
+		`[<>:"|?*]`,                           // Windows reserved characters
+		`(?i)^(con|prn|aux|nul|com\d|lpt\d)$`, // Windows reserved names
+		`^\.+$`,                               // Dots only
+		`(?i)(\.php|\.asp|\.exe|\.dll|\.bat|\.cmd|\.sh)$`, // Dangerous extensions
 	}
 )
 
@@ -106,12 +125,28 @@ func (rl *ipRateLimiter) getLimiter(ip string) *rate.Limiter {
 // SecurityHeaders adds security-related HTTP headers to the response
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Basic security headers
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
-		w.Header().Set("Server", "WebDAV")
+
+		// Enhanced Content Security Policy
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'; sandbox")
+
+		// HTTP Strict Transport Security (max age: 1 year)
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+
+		// Permissions Policy
+		w.Header().Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()")
+
+		// Cross-Origin headers
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+
+		// Remove Server header
+		w.Header().Del("Server")
 
 		next.ServeHTTP(w, r)
 	})
@@ -159,10 +194,39 @@ func RateLimiter(next http.Handler) http.Handler {
 
 // ValidateFilePath checks if the file path is safe and allowed
 func ValidateFilePath(path string) error {
-	// Check for disallowed path patterns
+	// Check path length
+	if len(path) == 0 || len(path) > MaxPathLength {
+		return fmt.Errorf("path length must be between 1 and %d characters", MaxPathLength)
+	}
+
+	// Check individual path segments
+	segments := strings.Split(path, "/")
+	if len(segments) > MaxPathSegments {
+		return fmt.Errorf("path cannot have more than %d segments", MaxPathSegments)
+	}
+
+	// Check path depth
+	depth := 0
+	for _, segment := range segments {
+		if segment == ".." {
+			depth--
+		} else if segment != "." && segment != "" {
+			depth++
+		}
+		if depth < 0 || depth > MaxPathDepth {
+			return fmt.Errorf("invalid path depth")
+		}
+
+		// Check segment length
+		if len(segment) > MaxFileNameLength {
+			return fmt.Errorf("file name length must not exceed %d characters", MaxFileNameLength)
+		}
+	}
+
+	// Check for disallowed patterns
 	for _, pattern := range DisallowedPaths {
 		if strings.Contains(path, pattern) {
-			return fmt.Errorf("invalid path pattern detected")
+			return fmt.Errorf("path contains invalid pattern: %s", pattern)
 		}
 	}
 
