@@ -1,3 +1,10 @@
+# [2.1.0](https://github.com/pondi/pulsedav/compare/v2.0.1...v2.1.0) (2025-02-13)
+
+
+### Features
+
+* Add comprehensive logging system with console and S3 sinks ([afaef96](https://github.com/pondi/pulsedav/commit/afaef96aab659ad5d9efee4f63ad8d8fd36d4ec0))
+
 ## [2.0.1](https://github.com/pondi/pulsedav/compare/v2.0.0...v2.0.1) (2025-02-13)
 
 
