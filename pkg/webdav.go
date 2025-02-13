@@ -156,7 +156,7 @@ func (h *WebDAVHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOptions handles OPTIONS requests for WebDAV protocol discovery
-func (h *WebDAVHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
+func (h *WebDAVHandler) handleOptions(w http.ResponseWriter, _ *http.Request) {
 	// Only allow specific headers for security
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Depth, If-Match, If-None-Match, Lock-Token, Timeout, X-Expected-Entity-Length")
 	w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS, PROPFIND")

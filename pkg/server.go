@@ -72,17 +72,6 @@ func NewServer() (*Server, error) {
 	return newServerWithS3Client(s3Client)
 }
 
-// newServerWithS3ClientFactory creates a new server using a custom S3 client factory.
-// This is primarily used for testing.
-func newServerWithS3ClientFactory(s3ClientFactory func() (S3Interface, error)) (*Server, error) {
-	s3Client, err := s3ClientFactory()
-	if err != nil {
-		return nil, err
-	}
-
-	return newServerWithS3Client(s3Client)
-}
-
 // newServerWithS3Client creates a new server with the provided S3 client.
 // This is primarily used for testing.
 func newServerWithS3Client(s3Client S3Interface) (*Server, error) {

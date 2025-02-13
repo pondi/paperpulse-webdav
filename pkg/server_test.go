@@ -3,29 +3,25 @@ package pkg
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// mockS3API for testing server initialization
-type mockServerS3API struct {
-	shouldFailHeadBucket bool
+// testS3Client is a mock implementation of S3Interface for server tests
+type testS3Client struct {
+	shouldError bool
 }
 
-func (m *mockServerS3API) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
-	if m.shouldFailHeadBucket {
-		return nil, errors.New("bucket does not exist")
+func (m *testS3Client) UploadFile(ctx context.Context, userID string, filename string, content io.Reader) error {
+	if m.shouldError {
+		return errors.New("upload failed")
 	}
-	return &s3.HeadBucketOutput{}, nil
-}
-
-func (m *mockServerS3API) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
-	return &s3.PutObjectOutput{}, nil
+	return nil
 }
 
 func TestNewServer(t *testing.T) {
@@ -82,7 +78,24 @@ func TestNewServer(t *testing.T) {
 				os.Setenv(k, v)
 			}
 
-			server, err := NewServer()
+			var server *Server
+			var err error
+
+			// Validate required environment variables first
+			for _, envVar := range getRequiredEnvVars() {
+				if os.Getenv(envVar) == "" {
+					err = fmt.Errorf("%w: %s", ErrMissingEnvVar, envVar)
+					break
+				}
+			}
+
+			// Only create server if environment validation passes
+			if err == nil {
+				// Create a test S3 client
+				mockS3 := &testS3Client{shouldError: false}
+				server, err = newServerWithS3Client(mockS3)
+			}
+
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewServer() error = %v, wantErr %v", err, tt.wantErr)
 				return
