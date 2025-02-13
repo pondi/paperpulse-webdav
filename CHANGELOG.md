@@ -1,3 +1,10 @@
+## [2.0.1](https://github.com/pondi/pulsedav/compare/v2.0.0...v2.0.1) (2025-02-13)
+
+
+### Bug Fixes
+
+* Update dependencies and test configurations ([2d37f5f](https://github.com/pondi/pulsedav/commit/2d37f5f186bf7330c6e1e28afe22cd582e850c1b))
+
 # [2.0.0](https://github.com/pondi/pulsedav/compare/v1.0.0...v2.0.0) (2025-02-13)
 
 
