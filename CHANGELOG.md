@@ -1,3 +1,10 @@
+# [2.2.0](https://github.com/pondi/pulsedav/compare/v2.1.0...v2.2.0) (2025-02-13)
+
+
+### Features
+
+* Enhance authentication, S3 listing, and WebDAV handling ([311c9f0](https://github.com/pondi/pulsedav/commit/311c9f02abadec5be3eeeb1eb0b9650b8a3949cc))
+
 # [2.1.0](https://github.com/pondi/pulsedav/compare/v2.0.1...v2.1.0) (2025-02-13)
 
 
