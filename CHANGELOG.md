@@ -1,3 +1,10 @@
+## [2.2.1](https://github.com/pondi/pulsedav/compare/v2.2.0...v2.2.1) (2025-02-13)
+
+
+### Bug Fixes
+
+* Fix user ID support for local authentication ([c0e070b](https://github.com/pondi/pulsedav/commit/c0e070ba2644d23a5ee21c7ca69b767d1c045938))
+
 # [2.2.0](https://github.com/pondi/pulsedav/compare/v2.1.0...v2.2.0) (2025-02-13)
 
 
