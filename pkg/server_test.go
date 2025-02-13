@@ -3,7 +3,6 @@ package pkg
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,9 +32,11 @@ func TestNewServer(t *testing.T) {
 	// Save original env vars
 	originalBucket := os.Getenv("S3_BUCKET")
 	originalAuthURL := os.Getenv("AUTH_API_URL")
+	originalAPIAuth := os.Getenv("API_AUTH")
 	defer func() {
 		os.Setenv("S3_BUCKET", originalBucket)
 		os.Setenv("AUTH_API_URL", originalAuthURL)
+		os.Setenv("API_AUTH", originalAPIAuth)
 	}()
 
 	tests := []struct {
@@ -48,6 +49,8 @@ func TestNewServer(t *testing.T) {
 			envVars: map[string]string{
 				"S3_BUCKET":    "test-bucket",
 				"AUTH_API_URL": "http://auth-api",
+				"API_AUTH":     "true",
+				"S3_REGION":    "us-east-1",
 			},
 			wantErr: false,
 		},
@@ -55,6 +58,8 @@ func TestNewServer(t *testing.T) {
 			name: "missing S3 bucket",
 			envVars: map[string]string{
 				"AUTH_API_URL": "http://auth-api",
+				"API_AUTH":     "true",
+				"S3_REGION":    "us-east-1",
 			},
 			wantErr: true,
 		},
@@ -62,6 +67,8 @@ func TestNewServer(t *testing.T) {
 			name: "missing auth URL",
 			envVars: map[string]string{
 				"S3_BUCKET": "test-bucket",
+				"API_AUTH":  "true",
+				"S3_REGION": "us-east-1",
 			},
 			wantErr: true,
 		},
@@ -75,22 +82,7 @@ func TestNewServer(t *testing.T) {
 				os.Setenv(k, v)
 			}
 
-			// Create a mock S3 client factory
-			mockS3Factory := func() (S3Interface, error) {
-				// Validate required environment variables
-				for _, envVar := range RequiredEnvVars {
-					if os.Getenv(envVar) == "" {
-						return nil, fmt.Errorf("%w: %s", ErrMissingEnvVar, envVar)
-					}
-				}
-
-				return &S3Client{
-					s3Client: &mockServerS3API{},
-					bucket:   os.Getenv("S3_BUCKET"),
-				}, nil
-			}
-
-			server, err := newServerWithS3ClientFactory(mockS3Factory)
+			server, err := NewServer()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewServer() error = %v, wantErr %v", err, tt.wantErr)
 				return

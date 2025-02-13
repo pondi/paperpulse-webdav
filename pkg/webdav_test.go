@@ -225,8 +225,8 @@ func TestWebDAVHandler_ServeHTTP(t *testing.T) {
 			}
 
 			if tt.method != http.MethodPut && tt.wantCode == http.StatusMethodNotAllowed {
-				if allow := rr.Header().Get("Allow"); allow != "PUT" {
-					t.Errorf("wrong Allow header: got %v want PUT", allow)
+				if allow := rr.Header().Get("Allow"); allow != "OPTIONS, PUT, PROPFIND" {
+					t.Errorf("wrong Allow header: got %v want OPTIONS, PUT, PROPFIND", allow)
 				}
 			}
 		})

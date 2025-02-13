@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestAuthenticator_Authenticate(t *testing.T) {
@@ -109,9 +112,15 @@ func TestAuthenticator_Authenticate(t *testing.T) {
 
 			// Create authenticator with test server URL
 			auth := &Authenticator{
-				client:  server.Client(),
-				authURL: server.URL,
+				client:         server.Client(),
+				authURL:        server.URL,
+				useAPIAuth:     true,
+				failedAttempts: make(map[string]*failedAttempt),
+				rateLimiter:    rate.NewLimiter(rate.Every(time.Minute/AuthRateLimit), AuthRateLimit),
+				cleanupTicker:  time.NewTicker(5 * time.Minute),
+				done:           make(chan struct{}),
 			}
+			defer auth.Shutdown()
 
 			// Call Authenticate
 			result, err := auth.Authenticate(context.Background(), tt.username, tt.password)
