@@ -100,6 +100,7 @@ type APIAuthenticator struct {
 type LocalAuthenticator struct {
 	username string
 	password string
+	userID   string
 }
 
 // createAuthenticator creates an authenticator instance with the configured auth settings
@@ -337,9 +338,15 @@ func createAPIAuthenticator(apiURL string) *APIAuthenticator {
 
 // createLocalAuthenticator creates a local authenticator
 func createLocalAuthenticator(username, password string) *LocalAuthenticator {
+	// Use the LOCAL_AUTH_USER_ID from environment
+	userID := os.Getenv("LOCAL_AUTH_USER_ID")
+	if userID == "" {
+		userID = "1" // Default local user ID if not set
+	}
 	return &LocalAuthenticator{
 		username: username,
 		password: password,
+		userID:   userID,
 	}
 }
 
@@ -383,7 +390,8 @@ func (a *LocalAuthenticator) Authenticate(_ context.Context, username, password 
 	if username == a.username && password == a.password {
 		return AuthResult{
 			Authenticated: true,
-			UserID:        username,
+			UserID:        a.userID,
+			Username:      username,
 		}, nil
 	}
 
