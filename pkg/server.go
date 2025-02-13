@@ -1,3 +1,4 @@
+// Package pkg implements the core WebDAV server functionality.
 package pkg
 
 import (
@@ -8,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -17,129 +17,127 @@ import (
 
 // Common errors
 var (
+	// ErrMissingEnvVar indicates a required environment variable is not set
 	ErrMissingEnvVar = errors.New("required environment variable not set")
 )
 
 // Server configuration constants
 const (
-	DefaultPort         = "80"
-	DefaultAddr         = ":" + DefaultPort
-	DefaultReadTimeout  = 30 * time.Second
+	// DefaultPort is the default server port if none is specified
+	DefaultPort = "80"
+
+	// DefaultReadTimeout is the maximum duration for reading the entire request
+	DefaultReadTimeout = 30 * time.Second
+
+	// DefaultWriteTimeout is the maximum duration before timing out writes of the response
 	DefaultWriteTimeout = 30 * time.Second
-	DefaultIdleTimeout  = 120 * time.Second
-	ShutdownTimeout     = 30 * time.Second
+
+	// DefaultIdleTimeout is the maximum amount of time to wait for the next request
+	DefaultIdleTimeout = 120 * time.Second
+
+	// ShutdownTimeout is the maximum duration to wait for server shutdown
+	ShutdownTimeout = 30 * time.Second
 )
 
-// RequiredEnvVars lists the environment variables that must be set
-var RequiredEnvVars = []string{
-	"S3_BUCKET",
-}
+// ServerConfig holds the complete server configuration including S3 and auth settings
+type ServerConfig struct {
+	// Port specifies the server listening port (e.g., "80")
+	Port string
 
-// getRequiredEnvVars returns the list of required environment variables based on auth mode
-func getRequiredEnvVars() []string {
-	vars := RequiredEnvVars
-	if strings.ToLower(os.Getenv("API_AUTH")) == "true" {
-		vars = append(vars, "AUTH_API_URL")
-	} else {
-		vars = append(vars, "LOCAL_AUTH_USERNAME", "LOCAL_AUTH_PASSWORD")
-	}
-	return vars
-}
+	// ReadTimeout is the maximum duration for reading the entire request
+	ReadTimeout time.Duration
 
-// Server represents the WebDAV server configuration
-type Server struct {
-	Addr         string
-	ReadTimeout  time.Duration
+	// WriteTimeout is the maximum duration before timing out writes of the response
 	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
-	Handler      http.Handler
-	logger       *logging.Logger
-	auditLogger  *logging.AuditLogger
+
+	// IdleTimeout is the maximum amount of time to wait for the next request
+	IdleTimeout time.Duration
+
+	// S3Config holds the S3 storage configuration
+	S3Config *S3Config
+
+	// AuthConfig holds the authentication configuration
+	AuthConfig *AuthConfig
 }
 
-// NewServer creates a new WebDAV server with default configuration.
-// It loads environment variables and initializes all required components.
-func NewServer() (*Server, error) {
-	// Validate required environment variables
-	for _, envVar := range getRequiredEnvVars() {
-		if os.Getenv(envVar) == "" {
-			return nil, fmt.Errorf("%w: %s", ErrMissingEnvVar, envVar)
-		}
-	}
-
-	// Initialize components
-	s3Client, err := initS3Client()
-	if err != nil {
-		return nil, err
-	}
-
-	// Initialize logger
-	logger, err := initLogger(s3Client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize logger: %w", err)
-	}
-
-	// Create audit logger
-	auditLogger := logging.NewAuditLogger(logger)
-
-	server, err := newServerWithS3Client(s3Client)
-	if err != nil {
-		return nil, err
-	}
-
-	server.logger = logger
-	server.auditLogger = auditLogger
-
-	return server, nil
-}
-
-// newServerWithS3Client creates a new server with the provided S3 client.
-// This is primarily used for testing.
-func newServerWithS3Client(s3Client S3Interface) (*Server, error) {
-	if s3Client == nil {
-		return nil, fmt.Errorf("s3 client cannot be nil")
-	}
-
-	// Initialize logger
-	logger, err := initLogger(s3Client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize logger: %w", err)
-	}
-
-	// Create audit logger
-	auditLogger := logging.NewAuditLogger(logger)
-
-	// Create WebDAV handler with middleware chain
-	handler := buildHandlerChain(NewAuthenticator(), s3Client, logger, auditLogger)
-
-	// Get port from environment variable or use default
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = DefaultPort
-	}
-	addr := ":" + port
-
-	return &Server{
-		Addr:         addr,
-		Handler:      handler,
+// DefaultServerConfig returns a ServerConfig initialized with default values.
+// Note: S3Config and AuthConfig must be set separately as they have no defaults.
+func DefaultServerConfig() *ServerConfig {
+	return &ServerConfig{
+		Port:         DefaultPort,
 		ReadTimeout:  DefaultReadTimeout,
 		WriteTimeout: DefaultWriteTimeout,
 		IdleTimeout:  DefaultIdleTimeout,
-		logger:       logger,
-		auditLogger:  auditLogger,
-	}, nil
+	}
 }
 
-// initS3Client initializes the S3 client with error handling
-func initS3Client() (S3Interface, error) {
-	s3Client, err := NewS3Client(context.Background(), os.Getenv("S3_BUCKET"))
+// Server represents a configured WebDAV server instance.
+// It encapsulates all the components needed to handle WebDAV requests.
+type Server struct {
+	config       *ServerConfig        // Server configuration
+	handler      http.Handler         // Main request handler chain
+	logger       *logging.Logger      // Application logger
+	auditLogger  *logging.AuditLogger // Audit event logger
+	shutdownFunc func() error         // Custom shutdown logic
+}
+
+// InitServer initializes a new server instance with the given configuration.
+// It sets up all required components:
+// - S3 client for file storage
+// - Logging system with console and S3 output
+// - Authentication (API or local)
+// - WebDAV request handler with middleware chain
+// If config is nil, default configuration will be used.
+func InitServer(config *ServerConfig) (*Server, error) {
+	if config == nil {
+		config = DefaultServerConfig()
+	}
+
+	// Initialize S3 client
+	s3Client, err := createS3Client(context.Background(), config.S3Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize S3 client: %w", err)
 	}
-	return s3Client, nil
+
+	// Initialize logger
+	logger, err := initLogger(s3Client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+	}
+
+	// Create audit logger
+	auditLogger := logging.NewAuditLogger(logger)
+
+	// Initialize authenticator based on config
+	var authenticator AuthenticatorInterface
+	if config.AuthConfig.APIEnabled {
+		authenticator = createAPIAuthenticator(config.AuthConfig.APIURL)
+	} else {
+		authenticator = createLocalAuthenticator(config.AuthConfig.Username, config.AuthConfig.Password)
+	}
+
+	// Create WebDAV handler with middleware chain
+	handler := buildHandlerChain(authenticator, s3Client, logger, auditLogger)
+
+	return &Server{
+		config:      config,
+		handler:     handler,
+		logger:      logger,
+		auditLogger: auditLogger,
+		shutdownFunc: func() error {
+			if err := logger.Flush(); err != nil {
+				log.Printf("Error flushing logs: %v", err)
+			}
+			if err := logger.Close(); err != nil {
+				log.Printf("Error closing logger: %v", err)
+			}
+			return nil
+		},
+	}, nil
 }
 
-// initLogger initializes the logging system
+// initLogger initializes the logging system with both console and S3 output.
+// The S3 sink stores logs under webdav/{env}/webdav-server/* for persistence.
 func initLogger(s3Client S3Interface) (*logging.Logger, error) {
 	// Get the environment from env var or default to development
 	env := os.Getenv("ENVIRONMENT")
@@ -171,9 +169,15 @@ func initLogger(s3Client S3Interface) (*logging.Logger, error) {
 	return logger, nil
 }
 
-// buildHandlerChain creates the middleware chain for the WebDAV handler
+// buildHandlerChain creates the middleware chain for the WebDAV handler.
+// The chain includes (from outer to inner):
+// 1. Security headers (CORS, content security)
+// 2. Request logging with correlation IDs
+// 3. Rate limiting per IP
+// 4. Request size limits
+// 5. WebDAV handler (auth, file operations)
 func buildHandlerChain(authenticator AuthenticatorInterface, s3Client S3Interface, logger *logging.Logger, auditLogger *logging.AuditLogger) http.Handler {
-	webdavHandler := NewWebDAVHandler(authenticator, s3Client, auditLogger)
+	webdavHandler := setupWebDAVHandler(authenticator, s3Client, auditLogger)
 
 	return SecurityHeaders(
 		logging.RequestLoggerMiddleware(logger)(
@@ -186,14 +190,18 @@ func buildHandlerChain(authenticator AuthenticatorInterface, s3Client S3Interfac
 	)
 }
 
-// ListenAndServe starts the WebDAV server with graceful shutdown support
+// ListenAndServe starts the WebDAV server and blocks until shutdown.
+// It handles graceful shutdown on:
+// - Context cancellation
+// - SIGINT or SIGTERM signals
+// - Server errors
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	server := &http.Server{
-		Addr:         s.Addr,
-		Handler:      s.Handler,
-		ReadTimeout:  s.ReadTimeout,
-		WriteTimeout: s.WriteTimeout,
-		IdleTimeout:  s.IdleTimeout,
+		Addr:         ":" + s.config.Port,
+		Handler:      s.handler,
+		ReadTimeout:  s.config.ReadTimeout,
+		WriteTimeout: s.config.WriteTimeout,
+		IdleTimeout:  s.config.IdleTimeout,
 	}
 
 	// Channel for server errors
@@ -205,7 +213,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	// Start server in goroutine
 	go func() {
-		log.Printf("Starting WebDAV server on %s", server.Addr)
+		log.Printf("Starting WebDAV server on :%s", s.config.Port)
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			serverError <- fmt.Errorf("server error: %w", err)
 		}
@@ -227,7 +235,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return s.shutdown(server)
 }
 
-// shutdown handles graceful server shutdown
+// shutdown performs a graceful server shutdown:
+// 1. Stops accepting new requests
+// 2. Waits for active requests to complete (up to ShutdownTimeout)
+// 3. Flushes logs and performs cleanup
+// 4. Closes the HTTP server
 func (s *Server) shutdown(server *http.Server) error {
 	// Create shutdown context with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
@@ -236,14 +248,9 @@ func (s *Server) shutdown(server *http.Server) error {
 	// Shutdown rate limiter
 	ShutdownRateLimiter()
 
-	// Flush logs before shutdown
-	if s.logger != nil {
-		if err := s.logger.Flush(); err != nil {
-			log.Printf("Error flushing logs: %v", err)
-		}
-		if err := s.logger.Close(); err != nil {
-			log.Printf("Error closing logger: %v", err)
-		}
+	// Run custom shutdown function
+	if err := s.shutdownFunc(); err != nil {
+		log.Printf("Error during custom shutdown: %v", err)
 	}
 
 	// Shutdown HTTP server
@@ -251,11 +258,11 @@ func (s *Server) shutdown(server *http.Server) error {
 		return fmt.Errorf("server shutdown failed: %w", err)
 	}
 
-	log.Println("Server shutdown completed")
 	return nil
 }
 
-// ServeHTTP implements the http.Handler interface for direct usage in other HTTP servers
+// ServeHTTP implements http.Handler, allowing the server to be used
+// as a handler in other HTTP servers if needed.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.Handler.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }

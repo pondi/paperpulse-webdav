@@ -44,6 +44,7 @@ type AuthResult struct {
 	Authenticated bool
 	UserID        string
 	Username      string
+	Error         error
 }
 
 // authRequest represents the authentication request payload
@@ -64,6 +65,14 @@ type authErrorResponse struct {
 	Messages map[string][]string `json:"messages,omitempty"`
 }
 
+// AuthConfig holds authentication configuration
+type AuthConfig struct {
+	APIEnabled bool
+	APIURL     string
+	Username   string
+	Password   string
+}
+
 // Authenticator handles user authentication against an external API or local credentials
 type Authenticator struct {
 	client      *http.Client
@@ -81,8 +90,20 @@ type Authenticator struct {
 	done           chan struct{}
 }
 
-// NewAuthenticator creates a new authenticator with the configured auth settings
-func NewAuthenticator() *Authenticator {
+// APIAuthenticator implements authentication against an external API
+type APIAuthenticator struct {
+	apiURL     string
+	httpClient *http.Client
+}
+
+// LocalAuthenticator implements local authentication with username/password
+type LocalAuthenticator struct {
+	username string
+	password string
+}
+
+// createAuthenticator creates an authenticator instance with the configured auth settings
+func createAuthenticator() *Authenticator {
 	useAPIAuth := strings.ToLower(os.Getenv("API_AUTH")) == "true"
 
 	auth := &Authenticator{
@@ -296,4 +317,72 @@ func (a *Authenticator) authenticateWithAPI(ctx context.Context, username, passw
 	default:
 		return AuthResult{}, fmt.Errorf("%w: %s", ErrAuthFailed, errorResp.Error)
 	}
+}
+
+// createAPIAuthenticator creates an API-based authenticator
+func createAPIAuthenticator(apiURL string) *APIAuthenticator {
+	return &APIAuthenticator{
+		apiURL: apiURL,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+}
+
+// createLocalAuthenticator creates a local authenticator
+func createLocalAuthenticator(username, password string) *LocalAuthenticator {
+	return &LocalAuthenticator{
+		username: username,
+		password: password,
+	}
+}
+
+// Authenticate implements AuthenticatorInterface for APIAuthenticator
+func (a *APIAuthenticator) Authenticate(ctx context.Context, username, password string) (AuthResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiURL, nil)
+	if err != nil {
+		return AuthResult{}, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return AuthResult{}, fmt.Errorf("authentication request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return AuthResult{
+			Authenticated: false,
+			Error:         fmt.Errorf("authentication failed with status: %d", resp.StatusCode),
+		}, nil
+	}
+
+	var result struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return AuthResult{}, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return AuthResult{
+		Authenticated: true,
+		UserID:        result.UserID,
+	}, nil
+}
+
+// Authenticate implements AuthenticatorInterface for LocalAuthenticator
+func (a *LocalAuthenticator) Authenticate(_ context.Context, username, password string) (AuthResult, error) {
+	if username == a.username && password == a.password {
+		return AuthResult{
+			Authenticated: true,
+			UserID:        username,
+		}, nil
+	}
+
+	return AuthResult{
+		Authenticated: false,
+		Error:         fmt.Errorf("invalid credentials"),
+	}, nil
 }

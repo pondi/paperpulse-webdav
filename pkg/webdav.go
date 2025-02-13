@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,18 @@ import (
 
 	"github.com/pondi/pulsedav/pkg/logging"
 )
+
+const (
+	// maxFileSize is the maximum allowed file size (100MB)
+	maxFileSize = 100 * 1024 * 1024
+)
+
+// WebDAVError represents a WebDAV error following RFC 4918
+type WebDAVError struct {
+	StatusCode int    // HTTP status code
+	Message    string // Human-readable message
+	ErrorCode  string // Machine-readable error code
+}
 
 // Common errors
 var (
@@ -33,7 +46,7 @@ var (
 	}
 	ErrInvalidRequest = &WebDAVError{
 		StatusCode: http.StatusBadRequest,
-		Message:    "invalid request",
+		Message:    "Invalid request",
 		ErrorCode:  "INVALID_REQUEST",
 	}
 	ErrMethodNotAllowed = &WebDAVError{
@@ -43,24 +56,26 @@ var (
 	}
 )
 
-// WebDAVError represents a WebDAV error following RFC 4918
-type WebDAVError struct {
-	StatusCode int    // HTTP status code
-	Message    string // Human-readable message
-	ErrorCode  string // Machine-readable error code
-}
-
 func (e *WebDAVError) Error() string {
 	return e.Message
 }
 
-// NewWebDAVError creates a new WebDAV error with the given status code and message
-func NewWebDAVError(statusCode int, message, errorCode string) *WebDAVError {
-	return &WebDAVError{
-		StatusCode: statusCode,
-		Message:    message,
-		ErrorCode:  errorCode,
-	}
+// WebDAVResponse represents a WebDAV XML response
+type WebDAVResponse struct {
+	XMLName   xml.Name `xml:"D:multistatus"`
+	XMLNS     string   `xml:"xmlns:D,attr"`
+	Responses []struct {
+		Href     string `xml:"D:href"`
+		PropStat struct {
+			Status string `xml:"D:status"`
+			Prop   struct {
+				ResourceType string    `xml:"D:resourcetype"`
+				LastModified time.Time `xml:"D:getlastmodified"`
+				ContentType  string    `xml:"D:getcontenttype"`
+				ContentLen   int64     `xml:"D:getcontentlength"`
+			} `xml:"D:prop"`
+		} `xml:"D:propstat"`
+	} `xml:"D:response"`
 }
 
 // writeWebDAVError writes a WebDAV-compatible error response following RFC 4918
@@ -112,9 +127,8 @@ type WebDAVHandler struct {
 	auditLogger *logging.AuditLogger
 }
 
-// NewWebDAVHandler creates a new WebDAV handler with the given authenticator and S3 client.
-// The handler only supports PUT operations, all other operations return 405 Method Not Allowed.
-func NewWebDAVHandler(authenticator AuthenticatorInterface, s3Client S3Interface, auditLogger *logging.AuditLogger) *WebDAVHandler {
+// setupWebDAVHandler creates and configures a WebDAV handler with the given dependencies
+func setupWebDAVHandler(authenticator AuthenticatorInterface, s3Client S3Interface, auditLogger *logging.AuditLogger) *WebDAVHandler {
 	if authenticator == nil {
 		panic("authenticator cannot be nil")
 	}
@@ -171,6 +185,122 @@ func (h *WebDAVHandler) handleOptions(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePropfind handles PROPFIND requests according to RFC 4918
+func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request) {
+	// Only support depth 0 for now
+	if r.Header.Get("Depth") != "0" {
+		writeWebDAVError(w, &WebDAVError{
+			StatusCode: http.StatusNotImplemented,
+			Message:    "Only Depth: 0 is supported",
+			ErrorCode:  "DEPTH_NOT_SUPPORTED",
+		})
+		return
+	}
+
+	// Create multistatus response
+	response := WebDAVResponse{
+		XMLNS: "DAV:",
+		Responses: []struct {
+			Href     string `xml:"D:href"`
+			PropStat struct {
+				Status string `xml:"D:status"`
+				Prop   struct {
+					ResourceType string    `xml:"D:resourcetype"`
+					LastModified time.Time `xml:"D:getlastmodified"`
+					ContentType  string    `xml:"D:getcontenttype"`
+					ContentLen   int64     `xml:"D:getcontentlength"`
+				} `xml:"D:prop"`
+			} `xml:"D:propstat"`
+		}{
+			{
+				Href: r.URL.Path,
+				PropStat: struct {
+					Status string `xml:"D:status"`
+					Prop   struct {
+						ResourceType string    `xml:"D:resourcetype"`
+						LastModified time.Time `xml:"D:getlastmodified"`
+						ContentType  string    `xml:"D:getcontenttype"`
+						ContentLen   int64     `xml:"D:getcontentlength"`
+					} `xml:"D:prop"`
+				}{
+					Status: "HTTP/1.1 200 OK",
+					Prop: struct {
+						ResourceType string    `xml:"D:resourcetype"`
+						LastModified time.Time `xml:"D:getlastmodified"`
+						ContentType  string    `xml:"D:getcontenttype"`
+						ContentLen   int64     `xml:"D:getcontentlength"`
+					}{
+						ResourceType: "<D:collection/>",
+						LastModified: time.Now().UTC(),
+					},
+				},
+			},
+		},
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusMultiStatus)
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	if err := enc.Encode(response); err != nil {
+		log.Printf("Error encoding PROPFIND response: %v", err)
+	}
+}
+
+// handlePut processes PUT requests by uploading the file to S3.
+// The file is stored in the "incoming/{userID}/{filename}" path.
+func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, userID string) {
+	// Ensure the request body is always closed
+	defer r.Body.Close()
+
+	// Extract and validate filename
+	filename := strings.TrimPrefix(r.URL.Path, "/")
+	if filename == "" {
+		writeWebDAVError(w, ErrInvalidFilename)
+		return
+	}
+
+	// Validate request body
+	if err := validateRequestBody(r); err != nil {
+		writeWebDAVError(w, fmt.Errorf("invalid request: %w", err))
+		return
+	}
+
+	// Validate file path and extension
+	if err := validateFilePath(filename); err != nil {
+		writeWebDAVError(w, fmt.Errorf("invalid file: %w", err))
+		return
+	}
+
+	// Read the entire file into memory with size limit
+	limitedReader := io.LimitReader(r.Body, maxFileSize)
+	fileData, err := io.ReadAll(limitedReader)
+	if err != nil {
+		writeWebDAVError(w, fmt.Errorf("failed to read file: %w", err))
+		return
+	}
+
+	// Check if file size exceeds limit
+	if len(fileData) >= maxFileSize {
+		writeWebDAVError(w, ErrFileTooLarge)
+		return
+	}
+
+	// Upload file to S3
+	err = h.s3Client.UploadFile(r.Context(), userID, filename, bytes.NewReader(fileData))
+	if err != nil {
+		writeWebDAVError(w, fmt.Errorf("failed to upload file: %w", err))
+		return
+	}
+
+	// Log successful upload
+	h.auditLogger.LogUpload(true, filename, int64(len(fileData)), r)
+
+	// Return success
+	w.WriteHeader(http.StatusCreated)
+}
+
 // authenticate handles Basic Authentication and returns the userID if successful.
 // It writes the appropriate error response if authentication fails.
 func (h *WebDAVHandler) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -219,109 +349,38 @@ func validateRequestBody(r *http.Request) error {
 	return nil
 }
 
-// handlePut processes PUT requests by uploading the file to S3.
-// The file is stored in the "incoming/{userID}/{filename}" path.
-func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, userID string) {
-	// Ensure the request body is always closed
-	defer r.Body.Close()
-
-	// Extract and validate filename
-	filename := strings.TrimPrefix(r.URL.Path, "/")
-	if filename == "" {
-		writeWebDAVError(w, ErrInvalidFilename)
-		return
+// validateFilePath validates the file path and extension
+func validateFilePath(filename string) error {
+	// Clean the path to prevent directory traversal
+	cleanPath := filepath.Clean(filename)
+	if cleanPath != filename {
+		return fmt.Errorf("invalid file path: path traversal detected")
 	}
 
-	// Validate request body
-	if err := validateRequestBody(r); err != nil {
-		writeWebDAVError(w, fmt.Errorf("invalid request: %w", err))
-		return
+	// Check for valid file extension
+	ext := strings.ToLower(filepath.Ext(filename))
+	if !isAllowedExtension(ext) {
+		return fmt.Errorf("invalid file extension: %s", ext)
 	}
 
-	// Validate file path and extension
-	if err := ValidateFilePath(filename); err != nil {
-		writeWebDAVError(w, fmt.Errorf("invalid file: %w", err))
-		return
-	}
-
-	// Read the entire file into memory with size limit
-	limitedReader := io.LimitReader(r.Body, MaxFileSize)
-	fileData, err := io.ReadAll(limitedReader)
-	if err != nil {
-		log.Printf("Failed to read file: %v", err)
-		writeWebDAVError(w, fmt.Errorf("failed to read file"))
-		return
-	}
-
-	// Check if we hit the size limit
-	if len(fileData) >= MaxFileSize {
-		writeWebDAVError(w, ErrFileTooLarge)
-		return
-	}
-
-	// Log the upload attempt
-	h.auditLogger.LogUpload(true, filename, r.ContentLength, r)
-
-	// Upload the buffered file to S3
-	if err := h.s3Client.UploadFile(r.Context(), userID, filename, bytes.NewReader(fileData)); err != nil {
-		// Log the error but don't expose internal details
-		log.Printf("Failed to upload file: %v", err)
-		writeWebDAVError(w, ErrUploadFailed)
-		return
-	}
-
-	// Set appropriate response headers only after successful upload
-	w.Header().Set("Location", "/"+filename)
-	w.WriteHeader(http.StatusCreated)
+	return nil
 }
 
-// handlePropfind processes PROPFIND requests according to RFC 4918
-func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request) {
-	// Check Depth header (0 = current resource, 1 = children, infinity = recursive)
-	depth := r.Header.Get("Depth")
-	if depth == "" {
-		depth = "infinity"
+// isAllowedExtension checks if the file extension is allowed
+func isAllowedExtension(ext string) bool {
+	allowedExtensions := map[string]bool{
+		".txt":  true,
+		".pdf":  true,
+		".doc":  true,
+		".docx": true,
+		".xls":  true,
+		".xlsx": true,
+		".jpg":  true,
+		".jpeg": true,
+		".png":  true,
+		".gif":  true,
+		".zip":  true,
+		".csv":  true,
 	}
-	if depth == "infinity" {
-		writeWebDAVError(w, &WebDAVError{
-			StatusCode: http.StatusForbidden,
-			Message:    "Infinity depth not allowed",
-			ErrorCode:  "INFINITY_NOT_SUPPORTED",
-		})
-		return
-	}
-
-	// Set response headers
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.WriteHeader(http.StatusMultiStatus)
-
-	// Generate minimal WebDAV response showing an empty directory
-	// This is secure as it doesn't expose any actual file information
-	response := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:">
-	<D:response>
-		<D:href>%s</D:href>
-		<D:propstat>
-			<D:prop>
-				<D:resourcetype><D:collection/></D:resourcetype>
-				<D:displayname>%s</D:displayname>
-				<D:getcontenttype>httpd/unix-directory</D:getcontenttype>
-				<D:getlastmodified>%s</D:getlastmodified>
-				<D:creationdate>%s</D:creationdate>
-				<D:quota-available-bytes>%d</D:quota-available-bytes>
-				<D:quota-used-bytes>%d</D:quota-used-bytes>
-			</D:prop>
-			<D:status>HTTP/1.1 200 OK</D:status>
-		</D:propstat>
-	</D:response>
-</D:multistatus>`,
-		r.URL.Path,
-		filepath.Base(r.URL.Path),
-		time.Now().UTC().Format(http.TimeFormat),
-		time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		MaxFileSize, // Use MaxFileSize as quota limit
-		0,           // No files stored yet
-	)
-
-	w.Write([]byte(response))
+	return allowedExtensions[ext]
 }

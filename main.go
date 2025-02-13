@@ -1,62 +1,66 @@
 // Package pulsedav provides a WebDAV server with S3-compatible storage backend.
 //
-// The server supports basic WebDAV operations with a focus on file uploads to S3.
-// File uploads (PUT requests) are stored in the S3 bucket under the path
-// "incoming/{userID}/{filename}". Other WebDAV operations are not supported.
+// The server implements a subset of the WebDAV protocol (RFC 4918) with a focus
+// on file uploads to S3. Files are stored in the S3 bucket under the path
+// "incoming/{userID}/{filename}".
 //
 // Server Configuration:
-//   - Default address: :80
+//   - Port: :80 (default, configurable via PORT env var)
 //   - Read timeout: 30 seconds
 //   - Write timeout: 30 seconds
 //   - Idle timeout: 120 seconds
 //   - Max file size: 100MB
-//   - Rate limit: 100 requests per minute
+//   - Rate limit: 100 requests per minute per IP
 //
-// Usage:
+// Required Environment Variables:
+//   - S3_BUCKET: S3 bucket name for file storage and logging
+//     And one of:
+//   - API_AUTH=true and AUTH_API_URL: External authentication API endpoint
+//   - API_AUTH=false and LOCAL_AUTH_USERNAME, LOCAL_AUTH_PASSWORD: Local auth credentials
 //
-//	import "github.com/pondi/pulsedav"
-//
-//	func main() {
-//	    server, err := pulsedav.NewDefaultServer()
-//	    if err != nil {
-//	        log.Fatal(err)
-//	    }
-//
-//	    ctx := context.Background()
-//	    if err := server.ListenAndServe(ctx); err != nil {
-//	        log.Fatal(err)
-//	    }
-//	}
-//
-// Required environment variables:
-//   - AUTH_API_URL: Authentication API endpoint
-//   - S3_BUCKET: S3 bucket name
-//
-// Optional environment variables:
+// Optional Environment Variables:
+//   - PORT: Server port (default: 80)
+//   - ENVIRONMENT: Environment name for logging (default: development)
 //   - S3_ENDPOINT: Custom S3 endpoint URL (for non-AWS services)
 //   - S3_REGION: S3 region (default: us-east-1)
-//   - S3_ACCESS_KEY: S3 access key
-//   - S3_SECRET_KEY: S3 secret key
-//   - S3_SESSION_TOKEN: Session token (if using temporary credentials)
+//   - S3_ACCESS_KEY: S3 access key (uses instance role if not set)
+//   - S3_SECRET_KEY: S3 secret key (uses instance role if not set)
+//   - S3_SESSION_TOKEN: Session token for temporary credentials
 //   - S3_FORCE_PATH_STYLE: Use path-style S3 URLs (default: false)
 //
 // Security Features:
-//   - Basic Authentication required
-//   - File size limit: 100MB
-//   - Rate limiting: 100 requests per minute
-//   - Allowed file extensions: .txt, .pdf, .doc, .docx, .xls, .xlsx, .jpg, .jpeg, .png, .gif, .zip, .csv
+//   - Basic Authentication (API or local)
+//   - Request rate limiting per IP
+//   - Maximum file size enforcement
+//   - Allowed file extensions only (.txt, .pdf, .doc, .docx, .xls, .xlsx,
+//     .jpg, .jpeg, .png, .gif, .zip, .csv)
 //   - Path traversal protection
-//   - Security headers
-//   - Request logging
+//   - Security headers (CORS, content security)
+//   - Comprehensive request and audit logging
+//   - Graceful shutdown handling
 //
-// Authentication:
-// The server uses Basic Authentication and validates credentials against an external
-// authentication API. The API must accept POST requests with username/password and
-// return a user ID that will be used in the S3 path structure.
+// Authentication Modes:
 //
-// WebDAV Operations:
-//   - PUT: Uploads file to S3 storage
-//   - Other operations: Not supported (returns 405 Method Not Allowed)
+//  1. API Authentication (API_AUTH=true):
+//     Validates credentials against an external API endpoint.
+//     The API must accept Basic Auth and return a user ID.
+//
+//  2. Local Authentication (API_AUTH=false):
+//     Uses configured username/password pair for Basic Auth.
+//     The username is used as the user ID for S3 paths.
+//
+// Supported WebDAV Operations:
+//   - PUT: Uploads file to S3 with size and type validation
+//   - PROPFIND (depth: 0): Returns basic directory information
+//   - OPTIONS: Returns WebDAV capabilities and CORS headers
+//   - Other operations return 405 Method Not Allowed
+//
+// Logging:
+//   - Console output for immediate visibility
+//   - S3 logging for persistence (under webdav/{env}/webdav-server/*)
+//   - Request logging with correlation IDs
+//   - Authentication audit logging
+//   - File upload audit logging
 package main
 
 import (
@@ -64,45 +68,83 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/pondi/pulsedav/pkg"
 )
 
-// Config represents the application configuration
-type Config struct {
-	S3 S3Config
-}
-
-// S3Config holds S3-specific configuration
-type S3Config struct {
-	Bucket   string
-	Region   string
-	Endpoint string
-}
-
-func main() {
-	// Load environment variables from .env file if it exists
+// loadConfig loads and validates the application configuration
+func loadConfig() (*pkg.ServerConfig, error) {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: .env file not found or error loading it: %v", err)
 	}
 
-	// Initialize configuration
-	config := &Config{
-		S3: S3Config{
-			Bucket:   os.Getenv("S3_BUCKET"),
-			Region:   os.Getenv("S3_REGION"),
-			Endpoint: os.Getenv("S3_ENDPOINT"),
+	cfg := &pkg.ServerConfig{
+		Port:         getEnvOrDefault("PORT", "80"),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		S3Config: &pkg.S3Config{
+			Bucket:         os.Getenv("S3_BUCKET"),
+			Region:         os.Getenv("S3_REGION"),
+			Endpoint:       os.Getenv("S3_ENDPOINT"),
+			AccessKey:      os.Getenv("S3_ACCESS_KEY"),
+			SecretKey:      os.Getenv("S3_SECRET_KEY"),
+			SessionToken:   os.Getenv("S3_SESSION_TOKEN"),
+			ForcePathStyle: os.Getenv("S3_FORCE_PATH_STYLE") == "true",
+		},
+		AuthConfig: &pkg.AuthConfig{
+			APIEnabled: os.Getenv("API_AUTH") == "true",
+			APIURL:     os.Getenv("AUTH_API_URL"),
+			Username:   os.Getenv("LOCAL_AUTH_USERNAME"),
+			Password:   os.Getenv("LOCAL_AUTH_PASSWORD"),
 		},
 	}
 
-	// Validate configuration
-	if config.S3.Bucket == "" {
-		log.Fatal("S3_BUCKET environment variable is required")
+	if err := validateConfig(cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Initialize server
-	server, err := NewDefaultServer()
+	return cfg, nil
+}
+
+// validateConfig validates the configuration
+func validateConfig(cfg *pkg.ServerConfig) error {
+	if cfg.S3Config.Bucket == "" {
+		return fmt.Errorf("S3_BUCKET is required")
+	}
+
+	if cfg.AuthConfig.APIEnabled {
+		if cfg.AuthConfig.APIURL == "" {
+			return fmt.Errorf("AUTH_API_URL is required when API_AUTH is true")
+		}
+	} else {
+		if cfg.AuthConfig.Username == "" || cfg.AuthConfig.Password == "" {
+			return fmt.Errorf("LOCAL_AUTH_USERNAME and LOCAL_AUTH_PASSWORD are required when API_AUTH is false")
+		}
+	}
+
+	return nil
+}
+
+// getEnvOrDefault returns the environment variable value or the default if not set
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func main() {
+	// Load configuration
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// Initialize server with configuration
+	server, err := pkg.InitServer(cfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize server: %v", err)
 	}
@@ -111,21 +153,8 @@ func main() {
 	ctx := context.Background()
 
 	// Start the server
-	log.Printf("Starting WebDAV server on %s", server.Addr)
+	log.Printf("Starting WebDAV server on :%s", cfg.Port)
 	if err := server.ListenAndServe(ctx); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
-}
-
-// NewDefaultServer creates a new WebDAV server with default configuration.
-// It loads environment variables and initializes all required components.
-func NewDefaultServer() (*pkg.Server, error) {
-	// Validate required environment variables
-	for _, envVar := range pkg.RequiredEnvVars {
-		if os.Getenv(envVar) == "" {
-			return nil, fmt.Errorf("%w: %s", pkg.ErrMissingEnvVar, envVar)
-		}
-	}
-
-	return pkg.NewServer()
 }
