@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -187,11 +188,11 @@ func (h *WebDAVHandler) handleOptions(w http.ResponseWriter, _ *http.Request) {
 
 // handlePropfind handles PROPFIND requests according to RFC 4918
 func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request) {
-	// Only support depth 0 for now
-	if r.Header.Get("Depth") != "0" {
+	depth := r.Header.Get("Depth")
+	if depth != "0" && depth != "1" {
 		writeWebDAVError(w, &WebDAVError{
 			StatusCode: http.StatusNotImplemented,
-			Message:    "Only Depth: 0 is supported",
+			Message:    "Only Depth: 0 or 1 is supported",
 			ErrorCode:  "DEPTH_NOT_SUPPORTED",
 		})
 		return
@@ -232,10 +233,51 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request) {
 					}{
 						ResourceType: "<D:collection/>",
 						LastModified: time.Now().UTC(),
+						ContentType:  "httpd/unix-directory",
 					},
 				},
 			},
 		},
+	}
+
+	// If depth is 1, add our placeholder message
+	if depth == "1" {
+		response.Responses = append(response.Responses, struct {
+			Href     string `xml:"D:href"`
+			PropStat struct {
+				Status string `xml:"D:status"`
+				Prop   struct {
+					ResourceType string    `xml:"D:resourcetype"`
+					LastModified time.Time `xml:"D:getlastmodified"`
+					ContentType  string    `xml:"D:getcontenttype"`
+					ContentLen   int64     `xml:"D:getcontentlength"`
+				} `xml:"D:prop"`
+			} `xml:"D:propstat"`
+		}{
+			Href: path.Join(r.URL.Path, "Please upload your file"),
+			PropStat: struct {
+				Status string `xml:"D:status"`
+				Prop   struct {
+					ResourceType string    `xml:"D:resourcetype"`
+					LastModified time.Time `xml:"D:getlastmodified"`
+					ContentType  string    `xml:"D:getcontenttype"`
+					ContentLen   int64     `xml:"D:getcontentlength"`
+				} `xml:"D:prop"`
+			}{
+				Status: "HTTP/1.1 200 OK",
+				Prop: struct {
+					ResourceType string    `xml:"D:resourcetype"`
+					LastModified time.Time `xml:"D:getlastmodified"`
+					ContentType  string    `xml:"D:getcontenttype"`
+					ContentLen   int64     `xml:"D:getcontentlength"`
+				}{
+					ResourceType: "",
+					LastModified: time.Now().UTC(),
+					ContentType:  "text/plain",
+					ContentLen:   24, // Length of "Please upload your file"
+				},
+			},
+		})
 	}
 
 	// Write response
@@ -308,7 +350,8 @@ func (h *WebDAVHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		h.auditLogger.LogAuthAttempt(false, username, r)
+		// Log initial auth challenge at INFO level
+		h.auditLogger.LogAuthAttempt(false, "", r)
 		return "", false
 	}
 

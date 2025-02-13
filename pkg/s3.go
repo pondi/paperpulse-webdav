@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -178,4 +179,84 @@ func (s *S3Client) GetS3Client() interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 } {
 	return s.client
+}
+
+// ListFiles lists files and directories in the S3 bucket with the given prefix.
+// It returns a slice of S3Items representing the contents.
+func (c *S3Client) ListFiles(ctx context.Context, prefix string) ([]S3Item, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+
+	// Ensure prefix ends with / for directory listing
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	input := &s3.ListObjectsV2Input{
+		Bucket:    aws.String(c.bucket),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"),
+	}
+
+	result, err := c.client.ListObjectsV2(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list objects: %w", err)
+	}
+
+	items := make([]S3Item, 0)
+
+	// Add common prefixes (directories)
+	for _, commonPrefix := range result.CommonPrefixes {
+		if commonPrefix.Prefix == nil {
+			continue
+		}
+		name := strings.TrimPrefix(*commonPrefix.Prefix, prefix)
+		name = strings.TrimSuffix(name, "/")
+		if name == "" {
+			continue
+		}
+
+		items = append(items, S3Item{
+			Name:         name,
+			IsCollection: "<D:collection/>",
+			LastModified: time.Now().UTC(), // Directories don't have last modified time in S3
+			ContentType:  "httpd/unix-directory",
+			Size:         0,
+		})
+	}
+
+	// Add objects (files)
+	for _, obj := range result.Contents {
+		if obj.Key == nil {
+			continue
+		}
+		name := strings.TrimPrefix(*obj.Key, prefix)
+		if name == "" {
+			continue
+		}
+
+		contentType := "application/octet-stream"
+		if strings.HasSuffix(strings.ToLower(name), ".pdf") {
+			contentType = "application/pdf"
+		} else if strings.HasSuffix(strings.ToLower(name), ".txt") {
+			contentType = "text/plain"
+		}
+		// Add more content type mappings as needed
+
+		var size int64
+		if obj.Size != nil {
+			size = *obj.Size
+		}
+
+		items = append(items, S3Item{
+			Name:         name,
+			IsCollection: "",
+			LastModified: *obj.LastModified,
+			ContentType:  contentType,
+			Size:         size,
+		})
+	}
+
+	return items, nil
 }

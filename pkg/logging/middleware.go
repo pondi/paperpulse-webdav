@@ -156,7 +156,11 @@ func (a *AuditLogger) LogAuthAttempt(success bool, username string, r *http.Requ
 
 	if success {
 		a.logger.Info("Authentication successful", fields)
+	} else if username == "" {
+		// Initial auth challenge (no credentials provided)
+		a.logger.Info("Authentication challenge", fields)
 	} else {
+		// Failed authentication attempt with credentials
 		a.logger.Warn("Authentication failed", fields)
 	}
 }

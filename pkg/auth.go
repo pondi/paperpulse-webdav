@@ -110,9 +110,10 @@ func createAuthenticator() *Authenticator {
 		client:         &http.Client{Timeout: 10 * time.Second},
 		useAPIAuth:     useAPIAuth,
 		failedAttempts: make(map[string]*failedAttempt),
-		rateLimiter:    rate.NewLimiter(rate.Every(time.Minute/AuthRateLimit), AuthRateLimit),
-		cleanupTicker:  time.NewTicker(5 * time.Minute),
-		done:           make(chan struct{}),
+		// Increase burst limit to handle concurrent requests better
+		rateLimiter:   rate.NewLimiter(rate.Every(time.Minute/AuthRateLimit), AuthRateLimit*2),
+		cleanupTicker: time.NewTicker(5 * time.Minute),
+		done:          make(chan struct{}),
 	}
 
 	if useAPIAuth {
@@ -140,15 +141,17 @@ func (a *Authenticator) cleanup() {
 	for {
 		select {
 		case <-a.cleanupTicker.C:
-			a.mu.Lock()
-			now := time.Now()
-			for username, attempt := range a.failedAttempts {
-				// Remove entries older than lockout duration
-				if now.Sub(attempt.lastFail) > LockoutDuration {
-					delete(a.failedAttempts, username)
+			func() {
+				a.mu.Lock()
+				defer a.mu.Unlock()
+				now := time.Now()
+				for username, attempt := range a.failedAttempts {
+					// Remove entries older than lockout duration
+					if now.Sub(attempt.lastFail) > LockoutDuration {
+						delete(a.failedAttempts, username)
+					}
 				}
-			}
-			a.mu.Unlock()
+			}()
 		case <-a.done:
 			a.cleanupTicker.Stop()
 			return
@@ -224,8 +227,8 @@ func (a *Authenticator) Authenticate(ctx context.Context, username, password str
 		return AuthResult{}, ErrInvalidCredentials
 	}
 
-	// Check rate limit
-	if !a.rateLimiter.Allow() {
+	// Check rate limit with a small burst allowance for concurrent requests
+	if !a.rateLimiter.AllowN(time.Now(), 1) {
 		return AuthResult{}, ErrRateLimitExceeded
 	}
 
@@ -248,22 +251,25 @@ func (a *Authenticator) Authenticate(ctx context.Context, username, password str
 				UserID:        a.localUserID,
 				Username:      username,
 			}
+			// Reset failed attempts on successful authentication
+			a.resetFailedAttempts(username)
 		} else {
+			// Record failed attempt before returning error
+			a.recordFailedAttempt(username)
 			err = ErrInvalidCredentials
 		}
 	} else {
 		result, err = a.authenticateWithAPI(ctx, username, password)
+		if err != nil {
+			// Record failed attempt before returning error
+			a.recordFailedAttempt(username)
+		} else {
+			// Reset failed attempts on successful authentication
+			a.resetFailedAttempts(username)
+		}
 	}
 
-	// Handle authentication result
-	if err != nil {
-		a.recordFailedAttempt(username)
-		return AuthResult{}, err
-	}
-
-	// Reset failed attempts on successful authentication
-	a.resetFailedAttempts(username)
-	return result, nil
+	return result, err
 }
 
 // authenticateWithAPI handles authentication with the external API
